@@ -1,0 +1,24 @@
+# updates2mqtt: one per Docker host. Publishes a Home Assistant "update" entity per
+# container; nothing updates until you press Install in HA.
+# Put this folder next to your other app folders, copy .env.example to .env, fill it in,
+# then: docker compose -f updates2mqtt.yml up -d   (or set COMPOSE_FILE in .env)
+services:
+  updates2mqtt:
+    image: ghcr.io/rhizomatics/updates2mqtt:latest
+    container_name: updates2mqtt
+    hostname: ${HOST_NAME}          # becomes the host name shown in HA
+    restart: unless-stopped
+    # Pass only what the container needs. Don't use env_file: .env here: a
+    # COMPOSE_FILE line in .env would leak into the container and break every
+    # `docker compose up` it runs in your other app folders.
+    environment:
+      MQTT_HOST: ${MQTT_HOST}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USER: ${MQTT_USER}
+      MQTT_PASS: ${MQTT_PASS}
+    volumes:
+      - ./conf:/app/conf
+      - /var/run/docker.sock:/var/run/docker.sock
+      # must be the SAME absolute path inside and outside the container, so it can
+      # run `docker compose` in each app folder when you press Install
+      - ${DOCKER_DIR}:${DOCKER_DIR}

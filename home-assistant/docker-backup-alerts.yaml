@@ -1,0 +1,53 @@
+# Home Assistant automation: alert when a nightly Docker backup fails or goes stale.
+# Works for any number of hosts running pbs-docker-backup.sh with MQTT enabled.
+#
+# Paste into Settings → Automations → Create → ⋮ → Edit in YAML, then:
+#   - replace notify.notify with your phone's service (e.g. notify.mobile_app_<phone>)
+#   - set the 08:00 check to a few hours after your last backup starts
+alias: Docker backup alerts
+description: Notify when a host's Docker backup fails, or hasn't succeeded in 26 hours
+mode: queued
+triggers:
+  # sent once by the script when a run fails (not retained, so no repeats after HA restarts)
+  - trigger: mqtt
+    topic: pbs-docker-backup/+/event
+    id: failed
+  # catches runs that never report: host down, cron missing, script hung or killed
+  - trigger: time
+    at: "08:00:00"
+    id: stale
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: failed
+        sequence:
+          - action: notify.notify
+            data:
+              title: Docker backup failed
+              message: >-
+                {% set e = trigger.payload_json %}
+                {{ e.host }}:
+                {{ (e.failed or []) | join(', ') or e.error or 'unknown error' }}
+      - conditions:
+          - condition: trigger
+            id: stale
+          - condition: template
+            value_template: "{{ stale_hosts | length > 0 }}"
+        sequence:
+          - action: notify.notify
+            data:
+              title: Docker backup overdue
+              message: "No successful backup in 26h on: {{ stale_hosts | join(', ') }}"
+variables:
+  # every sensor.docker_backup_<host>_last_success the script has created
+  stale_hosts: >-
+    {% set ns = namespace(stale=[]) %}
+    {% for s in states.sensor
+         | selectattr('entity_id', 'search', '^sensor\.docker_backup_.+_last_success$') %}
+      {% set t = as_datetime(s.state, none) %}
+      {% if t is none or t < now() - timedelta(hours=26) %}
+        {% set ns.stale = ns.stale + [s.entity_id[21:-13]] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.stale }}

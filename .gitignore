@@ -1,0 +1,8 @@
+# your host list and real settings stay local
+scripts/deploy.hosts
+.env
+*.env
+!*.env.example
+
+.DS_Store
+._*

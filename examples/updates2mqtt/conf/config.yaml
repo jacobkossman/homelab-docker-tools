@@ -1,0 +1,13 @@
+# Optional updates2mqtt config. Only needed to give each update entity its own
+# title in HA's Updates page (instead of one shared "<host> updates2mqtt" device),
+# which home-assistant/rename-update-entities.py then renames to "<app> (<host>)".
+#
+# If you switch an existing host to this: delete its updates2mqtt device in HA
+# (MQTT → device → Delete), then `docker restart updates2mqtt`.
+mqtt:
+  host: ${oc.env:MQTT_HOST}
+  user: ${oc.env:MQTT_USER}
+  password: ${oc.env:MQTT_PASS}
+  port: ${oc.env:MQTT_PORT}
+homeassistant:
+  device_creation: false

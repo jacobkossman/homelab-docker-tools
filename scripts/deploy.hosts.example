@@ -1,0 +1,4 @@
+# Copy to deploy.hosts and list your Docker hosts: <name> <ssh target>
+# The name is what you pass to ./deploy.sh to deploy to just that host.
+media   alice@media.lan
+cameras alice@cameras.lan

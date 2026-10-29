@@ -1,0 +1,4 @@
+# /etc/cron.d/pbs-docker-backup — nightly at 03:00, output to the system log
+# read it with: journalctl -t pbs-docker-backup --since today
+# stagger the minute/hour across hosts so they don't all hit PBS at once
+0 3 * * * root /usr/local/bin/pbs-docker-backup.sh 2>&1 | logger -t pbs-docker-backup
