@@ -233,3 +233,7 @@ Move folders aside (`mv app ~/old-docker/`) rather than deleting them.
   `docker compose pull && docker compose up -d` in its folder.
 - **No backup right before an update.** updates2mqtt has no pre-update hook and HA's Install
   button can't be intercepted; the most recent nightly backup is what you roll back to.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
