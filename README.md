@@ -146,6 +146,9 @@ upload only changed chunks, and with a recent client only changed files are even
 4. **Mark apps.** Empty marker files in an app folder:
    - `touch <app>/.stopforbackup` for anything with a database or SQLite file (most *arr apps,
      Jellyfin, Home Assistant, Vaultwarden, Postgres/MariaDB). Copying those live risks a corrupt backup.
+     It stops every container using the folder, not just the folder's own compose project: if a
+     database keeps its data in `db/` but is defined in another app's compose file, marking `db/`
+     stops (and restarts) that whole app.
    - `touch <app>/.nobackup` to skip a folder.
    - `<app>/.pxarexclude` to skip paths in one app (see `examples/jellyfin.pxarexclude`).
      `recordings`, `clips`, `transcodes`, `cache`, `logs` and `MediaCover` are skipped

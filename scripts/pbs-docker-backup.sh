@@ -27,7 +27,9 @@
 #
 # Per-app markers (empty files in the app folder):
 #   .nobackup        skip this folder entirely
-#   .stopforbackup   stop its containers during its backup (databases, sqlite)
+#   .stopforbackup   during its backup, stop every container using the folder: its own
+#                    compose project, and any other project or container with a mount in
+#                    it (databases, sqlite; e.g. a DB folder used by another app's compose)
 # Per-app exclusions: put a .pxarexclude file in the folder (one glob per line,
 # a leading / anchors the pattern to the app folder, e.g. /config/metadata).
 #
@@ -100,9 +102,23 @@ compose() {
   if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
 }
 
-# running container ids belonging to the compose project in folder $1
-running_in() {
-  docker ps -q --filter "label=com.docker.compose.project.working_dir=$1"
+# running containers as "id|compose working dir|compose service|mount sources,"
+container_info() {
+  local ids
+  ids="$(docker ps -q --no-trunc)"
+  [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086
+  docker inspect --format '{{.Id}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{range .Mounts}}{{.Source}},{{end}}' $ids
+}
+
+# is path $1 equal to or inside folder $2?
+inside() { [ "$1" = "$2" ] || [[ "$1" == "$2/"* ]]; }
+
+# is $1 one of the remaining arguments?
+in_list() {
+  local needle="$1" x; shift
+  for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+  return 1
 }
 
 # named volumes ("name|host path") used by any container, running or not, of folder $1
@@ -121,17 +137,78 @@ if proxmox-backup-client help backup 2>&1 | grep -q 'change-detection-mode'; the
   EXTRA+=(--change-detection-mode metadata)
 fi
 
-# app currently stopped by us; restarted on exit if the script dies mid-backup
-STOPPED_DIR=""
-start_app() {
-  local dir="$1"
-  log "starting $(basename "$dir")"
-  (cd "$dir" && compose start) || log "WARNING: failed to start $(basename "$dir")"
+# what we stopped, restarted after the app's backup (and on exit if the script dies):
+# "<compose dir>|<service>" for compose containers, "|<id>" for plain ones
+STOPPED=()
+
+# stop every running container that uses folder $1: its own compose project, any other
+# project with a mount inside it (e.g. a database whose data lives in this folder but whose
+# service is defined in another app's compose file), and plain `docker run` containers.
+# A whole project is stopped, so an app isn't left running against a stopped database.
+stop_users() {
+  local dir="$1" info id wd svc mounts src hit entry
+  local dirs=() svcs=() srcs=()
+  info="$(container_info)"
+  while IFS='|' read -r id wd svc mounts; do
+    [ -n "$id" ] || continue
+    hit=0
+    if [ -n "$wd" ] && inside "$wd" "$dir"; then hit=1; fi
+    if [ "$hit" -eq 0 ]; then
+      IFS=',' read -ra srcs <<< "$mounts"
+      for src in ${srcs[@]+"${srcs[@]}"}; do
+        if inside "$src" "$dir"; then hit=1; break; fi
+      done
+    fi
+    [ "$hit" -eq 1 ] || continue
+    if [ -n "$wd" ] && [ -n "$svc" ]; then
+      in_list "$wd" ${dirs[@]+"${dirs[@]}"} || dirs+=("$wd")
+    else
+      STOPPED+=("|$id")
+    fi
+  done <<< "$info"
+
+  for wd in ${dirs[@]+"${dirs[@]}"}; do
+    svcs=()
+    while IFS='|' read -r id entry svc _; do
+      if [ "$entry" = "$wd" ] && [ -n "$svc" ]; then svcs+=("$svc"); fi
+    done <<< "$info"
+    log "stopping $(basename "$wd") (${svcs[*]})"
+    if (cd "$wd" && compose stop "${svcs[@]}"); then
+      for svc in "${svcs[@]}"; do STOPPED+=("$wd|$svc"); done
+    else
+      log "WARNING: could not stop $(basename "$wd"), backing up live"
+    fi
+  done
+
+  for entry in ${STOPPED[@]+"${STOPPED[@]}"}; do
+    [[ "$entry" == "|"* ]] || continue
+    log "stopping container ${entry:1:12}"
+    docker stop "${entry:1}" >/dev/null || log "WARNING: could not stop container ${entry:1:12}"
+  done
+}
+
+start_stopped() {
+  local entry wd done_dirs=() svcs=()
+  for entry in ${STOPPED[@]+"${STOPPED[@]}"}; do
+    wd="${entry%%|*}"
+    if [ -z "$wd" ]; then
+      log "starting container ${entry:1:12}"
+      docker start "${entry#|}" >/dev/null || log "WARNING: failed to start container ${entry:1:12}"
+      continue
+    fi
+    in_list "$wd" ${done_dirs[@]+"${done_dirs[@]}"} && continue
+    done_dirs+=("$wd")
+    svcs=()
+    for e in "${STOPPED[@]}"; do [ "${e%%|*}" = "$wd" ] && svcs+=("${e#*|}"); done
+    log "starting $(basename "$wd") (${svcs[*]})"
+    (cd "$wd" && compose start "${svcs[@]}") || log "WARNING: failed to start $(basename "$wd")"
+  done
+  STOPPED=()
 }
 REPORTED=0
 on_exit() {
   local rc=$?
-  if [ -n "$STOPPED_DIR" ]; then start_app "$STOPPED_DIR"; fi
+  if [ "${#STOPPED[@]}" -gt 0 ]; then start_stopped; fi
   # script died before its summary: still tell HA
   if [ "$rc" -ne 0 ] && [ "$REPORTED" -eq 0 ]; then
     local attrs="{\"host\":\"$HOST\",\"last_run\":\"$(date -Is)\",\"error\":\"script exited early with code $rc\"}"
@@ -162,14 +239,7 @@ for dir in "$BASE"/*/; do
   # archive and group names allow only letters, digits, '_' and '-'
   name="$(printf '%s' "$app" | tr -c 'A-Za-z0-9_-' '_')"
 
-  if [ -e "$dir/.stopforbackup" ] && [ -n "$(running_in "$dir")" ]; then
-    log "stopping $app"
-    if (cd "$dir" && compose stop); then
-      STOPPED_DIR="$dir"
-    else
-      log "WARNING: could not stop $app, backing it up live"
-    fi
-  fi
+  if [ -e "$dir/.stopforbackup" ]; then stop_users "$dir"; fi
 
   ARCHIVES=("$name.pxar:$dir")
   while IFS='|' read -r vol src; do
@@ -192,10 +262,7 @@ for dir in "$BASE"/*/; do
     FAILED+=("$app")
   fi
 
-  if [ -n "$STOPPED_DIR" ]; then
-    start_app "$STOPPED_DIR"
-    STOPPED_DIR=""
-  fi
+  if [ "${#STOPPED[@]}" -gt 0 ]; then start_stopped; fi
 done
 
 log "summary: ${#OK[@]} ok, ${#FAILED[@]} failed, ${#SKIPPED[@]} skipped"
